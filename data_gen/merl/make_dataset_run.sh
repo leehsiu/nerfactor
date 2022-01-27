@@ -26,7 +26,7 @@ shift
 shift
 
 PYTHONPATH="$REPO_DIR" \
-    python "$REPO_DIR"/data_gen/merl/make_dataset.py \
+    python "$REPO_DIR"/data_gen/merl/make_dataset_no_vis.py \
     --indir="$indir" \
     --ims="$ims" \
     --outdir="$outdir" \

@@ -112,38 +112,6 @@ def main(_):
         out_path = join(FLAGS.outdir, 'vali_%s.npz' % brdf.name)
         save_npz(vali_data, out_path)
 
-        # Visualize
-        vis_dir = join(FLAGS.outdir, 'vis')
-        for achro in (False, True):
-            # Characteristic slice
-            cslice = brdf.get_characterstic_slice()
-            if achro:
-                cslice = xm.img.rgb2lum(cslice)
-                cslice = np.tile(cslice[:, :, None], (1, 1, 3))
-            cslice_img = brdf.characteristic_slice_as_img(
-                cslice, clip_percentile=FLAGS.slice_percentile)
-            folder_name = 'cslice'
-            if achro:
-                folder_name += '_achromatic'
-            out_png = join(vis_dir, folder_name, brdf.name + '.png')
-            xm.io.img.write_img(cslice_img, out_png)
-            # Render with this BRDF
-            qrusink = brdf.dir2rusink(renderer.ldir, renderer.vdir)
-            lvis = renderer.lvis.astype(bool)
-            qrusink_flat = qrusink[lvis]
-            rgb_flat = brdf.query(qrusink_flat)
-            rgb = np.zeros_like(renderer.lcontrib)
-            rgb[lvis] = rgb_flat
-            if achro:
-                rgb = xm.img.rgb2lum(rgb)
-                rgb = np.tile(rgb[:, :, :, None], (1, 1, 1, 3))
-            render = renderer.render(rgb)
-            folder_name = 'render'
-            if achro:
-                folder_name += '_achromatic'
-            out_png = join(vis_dir, folder_name, brdf.name + '.png')
-            xm.io.img.write_arr(render, out_png, clip=True)
-
 
 if __name__ == '__main__':
     app.run(main)

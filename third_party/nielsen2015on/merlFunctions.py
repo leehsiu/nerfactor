@@ -4,14 +4,12 @@ import os.path as path
 
 def readMERLBRDF(filename):
     """Reads a MERL-type .binary file, containing a densely sampled BRDF
-    
     Returns a 4-dimensional array (phi_d, theta_h, theta_d, channel)"""
     print("Loading MERL-BRDF: ", filename)
     try: 
-        f = open(filename, "rb")
-        dims = np.fromfile(f,np.int32,3)
-        vals = np.fromfile(f,np.float64,-1)
-        f.close()
+        with open(filename, "rb") as f:
+            dims = np.fromfile(f,np.int32,3)
+            vals = np.fromfile(f,np.float64,-1)
     except IOError:
         print("Cannot read file: ", path.basename(filename))
         return
