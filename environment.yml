@@ -1,4 +1,4 @@
-name: nerfactor
+name: tf
 channels:
     - conda-forge
     - anaconda

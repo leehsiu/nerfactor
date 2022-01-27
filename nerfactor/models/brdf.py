@@ -14,7 +14,7 @@
 
 # pylint: disable=relative-beyond-top-level,arguments-differ
 
-from os.path import join, basename
+from os.path import join, basename,dirname,relpath
 import numpy as np
 import tensorflow as tf
 
@@ -226,6 +226,11 @@ class Model(BaseModel):
         # Shortcircuit if training
         if mode == 'train':
             return None
+
+        server_root = dirname(outpref)
+        def strip(path):
+            return relpath(path,server_root)
+
         # Put optimized latent code and BRDF value visualizations into HTML
         rows, caps, types = [], [], []
         # For each batch (which has just one sample)
@@ -236,8 +241,8 @@ class Model(BaseModel):
             metadata = str(metadata)
             row = [
                 metadata,
-                join(batch_dir, 'z.png'),
-                join(batch_dir, 'log10_brdf.png')]
+                strip(join(batch_dir, 'z.png')),
+                strip(join(batch_dir, 'log10_brdf.png'))]
             rowcaps = ["Metadata", "Latent Code", "BRDF (log-scale)"]
             rowtypes = ['text', 'image', 'image']
             # If we are testing, additional columns for char. slices and renders
@@ -247,7 +252,7 @@ class Model(BaseModel):
                 if '_' in id_:
                     # Interpolated identities
                     row_extra = [
-                        pred_cslice_path, pred_render_path, "N/A", "N/A"]
+                        strip(pred_cslice_path), strip(pred_render_path), "N/A", "N/A"]
                     rowtypes_extra = ['image', 'image', 'text', 'text']
                 else:
                     # Seen identities
