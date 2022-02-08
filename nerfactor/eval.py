@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from multiprocessing.spawn import get_preparation_data
 from os.path import join, basename
 from absl import app, flags
 import numpy as np
@@ -29,19 +30,13 @@ from third_party.turbo_colormap import turbo_colormap_data, interpolate_or_clip
 flags.DEFINE_string(
     'ckpt', '/path/to/ckpt-100', "path to checkpoint (prefix only)")
 flags.DEFINE_boolean('color_correct_albedo', False, "")
-flags.DEFINE_integer(
-    'sv_axis_i', 0, "along which axis we do spatially-varying edits")
-flags.DEFINE_float(
-    'sv_axis_min', -1.5, "axis minimum for spatially-varying edits")
-flags.DEFINE_float(
-    'sv_axis_max', 1.5, "axis maximum for spatially-varying edits")
-flags.DEFINE_string('tgt_albedo', None, "albedo edit name")
-flags.DEFINE_string('tgt_brdf', None, "BRDF edit name")
 flags.DEFINE_boolean('debug', False, "debug mode switch")
 FLAGS = flags.FLAGS
 
-logger = logutil.Logger(loggee="test")
+logger = logutil.Logger(loggee="eval")
 
+def tonemapping(src,gamma=2.2):
+    return src**(1./gamma)
 
 def compute_rgb_scales(alpha_thres=0.9):
     """Computes RGB scales that match predicted albedo to ground truth,
@@ -88,48 +83,126 @@ def compute_rgb_scales(alpha_thres=0.9):
     return opt_scale
 
 
-def get_albedo_override(xyz):
-    if FLAGS.tgt_albedo == 'aluminium':
-        tgt_albedo = (0.913, 0.921, 0.925)
-        return tf.convert_to_tensor(tgt_albedo, dtype=tf.float32)
 
-    if FLAGS.tgt_albedo == 'gold':
-        tgt_albedo = (1, 0.843, 0)
-        return tf.convert_to_tensor(tgt_albedo, dtype=tf.float32)
 
-    if FLAGS.tgt_albedo == 'green':
-        tgt_albedo = (0, 1, 0)
-        return tf.convert_to_tensor(tgt_albedo, dtype=tf.float32)
 
-    if FLAGS.tgt_albedo == 'rainbow':
-        rainbow = [
-            (0.58, 0, 0.83), (0.29, 0, 0.51), (0, 0, 1), (0, 1, 0), (1, 1, 0),
-            (1, 0.5, 0), (1, 0, 0)]
-        axis = xyz[:, FLAGS.sv_axis_i]
-        band_width = (FLAGS.sv_axis_max - FLAGS.sv_axis_min) / len(rainbow)
-        tgt_albedo = tf.zeros_like(xyz)
-        for i, color in enumerate(rainbow):
-            cond1 = axis >= FLAGS.sv_axis_min + i * band_width
-            cond2 = axis < FLAGS.sv_axis_min + (i + 1) * band_width
-            in_band = tf.logical_and(cond1, cond2)
-            ind = tf.where(in_band)
-            color = tf.convert_to_tensor(color, dtype=tf.float32)
-            color_rep = tf.tile(color[None, :], (tf.shape(ind)[0], 1))
-            tgt_albedo = tf.tensor_scatter_nd_update(tgt_albedo, ind, color_rep)
-        return tgt_albedo
+#albedo
+#normal
+#rgba_{}
+#pred_rgb_probes_{}
 
-    if FLAGS.tgt_albedo == 'turbo':
-        axis = xyz[:, FLAGS.sv_axis_i].numpy()
-        axis_normalized = (axis - FLAGS.sv_axis_min) / (
-            FLAGS.sv_axis_max - FLAGS.sv_axis_min)
-        tgt_albedo = []
-        for x in axis_normalized:
-            color = interpolate_or_clip(turbo_colormap_data, x)
-            tgt_albedo.append(color)
-        tgt_albedo = np.array(tgt_albedo)
-        return tf.convert_to_tensor(tgt_albedo, dtype=tf.float32)
+def cal_psnr(gt_path,pred_path,fg,gamma=False):
+    # Load prediction and GT
+    pred = xm.io.img.read(pred_path) # gamma corrected
+    gt = xm.io.img.read(gt_path) # linear
+    pred = xm.img.normalize_uint(pred)
+    gt = xm.img.normalize_uint(gt)
+    gt = xm.img.resize(gt, new_h=pred.shape[0], method='tf')
+    gt = gt[...,:3]
+    if gamma:
+        gt = tonemapping(gt)
 
-    raise NotImplementedError("Target albedo: %s" % FLAGS.tgt_albedo)
+    gt_fg = gt[fg,:]
+    pred_fg = pred[fg,:]
+    mse = np.mean((gt_fg - pred_fg)**2)
+    psnr = -10.*np.log(mse)/np.log(10.)
+    return psnr
+
+def cal_normal(gt_path,pred_path,fg):
+    # Load prediction and GT
+    pred = xm.io.img.read(pred_path) # gamma corrected
+    gt = xm.io.img.read(gt_path) # linear
+    pred = xm.img.normalize_uint(pred)
+    gt = xm.img.normalize_uint(gt)
+    gt = xm.img.resize(gt, new_h=pred.shape[0], method='tf')
+    gt = gt[...,:3]
+
+
+    gt_fg = gt[fg,:]*2.0 - 1.0
+    pred_fg = pred[fg,:]*2.0 - 1.0
+
+    gt_fg = xm.linalg.normalize(gt_fg,1)
+    pred_fg = xm.linalg.normalize(pred_fg,1)
+
+    dot = np.sum(gt_fg*pred_fg,axis=1)
+    dot = np.clip(dot,-1.,1.0)
+    dot_mean = np.mean(dot)
+
+    return np.arccos(dot_mean)/np.pi*180
+
+
+
+
+
+
+def eval(batch_dirs,alpha_thres=0.9):
+    config_ini = configutil.get_config_ini(FLAGS.ckpt)
+    config = ioutil.read_config(config_ini)
+    data_root = config.get('DEFAULT', 'data_root')
+
+    psnr_albedo = []
+    psnr_relight = []
+    psnr_fv = []
+    err_normal = []
+
+
+    import glob
+    all_lights_file = glob.glob(join(batch_dirs[0],'*probes*'))
+    all_lights = [basename(el)[16:-4] for el in all_lights_file]
+
+    for batch_dir in batch_dirs:
+        #Find GT path
+        metadata_path = join(batch_dir, 'metadata.json')
+        metadata = xm.io.json.load(metadata_path)
+        view = metadata['id']
+
+
+        pred_path = join(batch_dir, 'pred_albedo.png')
+        gt_path = join(data_root, view, 'albedo.png')
+
+        # Load prediction and GT
+        gt = xm.io.img.read(gt_path) # linear
+        pred = xm.io.img.read(pred_path)
+        gt = xm.img.normalize_uint(gt)
+        gt = xm.img.resize(gt, new_h=pred.shape[0], method='tf')
+        alpha = gt[:, :, 3]
+        fg = alpha > alpha_thres
+
+        psnr = cal_psnr(gt_path,pred_path,fg,True)
+        psnr_albedo.append(psnr)
+
+
+        pred_path = join(batch_dir, 'pred_rgb.png')
+        gt_path = join(data_root, view, 'rgba.png')
+        
+        psnr = cal_psnr(gt_path,pred_path,fg,False)
+        psnr_fv.append(psnr)
+
+        for light in all_lights:
+            pred_path = join(batch_dir, f'pred_rgb_probes_{light}.png')
+            gt_path = join(data_root, view, f'rgba_{light}.png')
+            # Load prediction and GT
+            psnr = cal_psnr(gt_path,pred_path,fg,False)
+            psnr_relight.append(psnr)
+
+        pred_path = join(batch_dir, 'pred_normal.png')
+        gt_path = join(data_root, view, 'normal.png')
+        err = cal_normal(gt_path,pred_path,fg)
+        err_normal.append(err)
+
+
+    print('albedo',np.mean(psnr_albedo))
+    print('fv',np.mean(psnr_fv))
+    print('relight',np.mean(psnr_relight))
+    print('normal',np.mean(err_normal))
+
+
+
+
+    # Compute color correction scales, in the linear space
+
+    return
+
 
 
 def main(_):
@@ -141,17 +214,12 @@ def main(_):
     config = ioutil.read_config(config_ini)
 
     # Output directory
-    outroot = join(config_ini[:-4], 'vis_test', basename(FLAGS.ckpt))
-    if FLAGS.tgt_albedo:
-        outroot = outroot.rstrip('/') + '_%s' % FLAGS.tgt_albedo
-    if FLAGS.tgt_brdf:
-        outroot = outroot.rstrip('/') + '_%s' % FLAGS.tgt_brdf
+    outroot = join(config_ini[:-4], 'vis_eval', basename(FLAGS.ckpt))
 
     # Make dataset
     logger.info("Making the actual data pipeline")
     dataset_name = config.get('DEFAULT', 'dataset')
     Dataset = datasets.get_dataset_class(dataset_name)
-    #dataset = Dataset(config, 'test', debug=FLAGS.debug)
     dataset = Dataset(config, 'vali', debug=FLAGS.debug)
     n_views = dataset.get_n_views()
     no_batch = config.getboolean('DEFAULT', 'no_batch')
@@ -166,45 +234,32 @@ def main(_):
 
     # Optionally, color-correct the albedo
     albedo_scales = None
-    if (not FLAGS.tgt_albedo) and FLAGS.color_correct_albedo:
+    if FLAGS.color_correct_albedo:
         albedo_scales = compute_rgb_scales()
 
-    # Optionally, edit BRDF
-    brdf_z_override = None
-    if FLAGS.tgt_brdf:
-        tgt_brdf_z = model.brdf_model.latent_code.z[
-            model.brdf_model.brdf_names.index(FLAGS.tgt_brdf), :]
-        brdf_z_override = tf.convert_to_tensor(tgt_brdf_z, dtype=tf.float32)
-
-    # For all test views
+    #For all test views
     logger.info("Running inference")
     for batch_i, batch in enumerate(
             tqdm(datapipe, desc="Inferring Views", total=n_views)):
-        relight_olat = batch_i == n_views - 1 # only for the final view
-        # Optionally, edit (spatially-varying) albedo
-        albedo_override = None
-        if FLAGS.tgt_albedo:
-            _, _, _, _, _, _, xyz, _, _ = batch
-            albedo_override = get_albedo_override(xyz)
         # Inference
         _, _, _, to_vis = model.call(
-            batch, mode='test', relight_olat=relight_olat, relight_probes=True,
-            albedo_scales=albedo_scales, albedo_override=albedo_override,
-            brdf_z_override=brdf_z_override)
+            batch, mode='vali', relight_probes=True,
+            albedo_scales=albedo_scales)
         # Visualize
         outdir = join(outroot, 'batch{i:09d}'.format(i=batch_i))
-        model.vis_batch(to_vis, outdir, mode='test', olat_vis=relight_olat)
+        model.vis_batch(to_vis, outdir, mode='vali')
         # Break if debugging
         if FLAGS.debug:
             break
 
-    # Compile all visualized batches into a consolidated view (e.g., an
-    # HTML or a video)
+    #calculate metrics
     batch_vis_dirs = xm.os.sortglob(outroot, 'batch?????????')
-    outpref = outroot # proper extension should be added in the function below
-    view_at = model.compile_batch_vis(batch_vis_dirs, outpref, mode='test')
-    logger.info("Compilation available for viewing at\n\t%s", view_at)
+    eval(batch_vis_dirs)
+
 
 
 if __name__ == '__main__':
     app.run(main)
+
+
+

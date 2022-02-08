@@ -14,7 +14,7 @@
 
 # pylint: disable=arguments-differ
 
-from os.path import basename, dirname, join, exists
+from os.path import basename, dirname, join, exists , relpath
 from collections import OrderedDict
 from tqdm import tqdm
 import numpy as np
@@ -263,7 +263,7 @@ class Model(ShapeModel):
         # ------ Rendering equation
         rgb_pred, rgb_olat, rgb_probes = self._render( # all Nx3
             lvis_pred, brdf, surf2l, normal_pred, relight_olat=relight_olat,
-            relight_probes=relight_probes)
+            relight_probes=relight_probes,light_scales=albedo_scales)
         # Put values back into the full shape
         ind = tf.where(mask)
         n = tf.shape(alpha)[0] # total number of rays
@@ -315,9 +315,12 @@ class Model(ShapeModel):
     def _render(
             self, light_vis, brdf, l, n,
             relight_olat=False, relight_probes=False,
-            white_light_override=False, white_lvis_override=False):
+            white_light_override=False, white_lvis_override=False,light_scales=None):
         linear2srgb = self.config.getboolean('DEFAULT', 'linear2srgb')
         light = self.light
+        if light_scales is not None:
+            light = light / light_scales
+
         if white_light_override:
             light = np.ones_like(self.light)
         if white_lvis_override:
@@ -759,6 +762,11 @@ class Model(ShapeModel):
         return view_at # to be logged into TensorBoard
 
     def _compile_into_webpage(self, batch_dirs, out_html):
+        server_root = dirname(out_html)
+        def strip(path):
+            return relpath(path,server_root)
+
+
         rows, caps, types = [], [], []
         # For each batch (which has just one sample)
         for batch_dir in batch_dirs:
@@ -767,34 +775,34 @@ class Model(ShapeModel):
             metadata = str(metadata)
             row = [
                 metadata,
-                join(batch_dir, 'pred-vs-gt_rgb.apng'),
-                join(batch_dir, 'pred_rgb.png'),
-                join(batch_dir, 'pred_albedo.png'),
-                join(batch_dir, 'pred_brdf.png')]
+                strip(join(batch_dir, 'pred-vs-gt_rgb.apng')),
+                strip(join(batch_dir, 'pred_rgb.png')),
+                strip(join(batch_dir, 'pred_albedo.png')),
+                strip(join(batch_dir, 'pred_brdf.png'))]
             rowcaps = [
                 "Metadata", "RGB", "RGB (pred.)", "Albedo (pred.)",
                 "BRDF (pred.)"]
             rowtypes = ['text', 'image', 'image', 'image', 'image']
             if self.shape_mode == 'nerf':
-                row.append(join(batch_dir, 'gt_normal.png'))
+                row.append(strip(join(batch_dir, 'gt_normal.png')))
                 rowcaps.append("Normal (initial)")
                 rowtypes.append('image')
             else:
-                row.append(join(batch_dir, 'pred-vs-gt_normal.apng'))
+                row.append(strip(join(batch_dir, 'pred-vs-gt_normal.apng')))
                 rowcaps.append("Normal")
                 rowtypes.append('image')
-                row.append(join(batch_dir, 'pred_normal.png'))
+                row.append(strip(join(batch_dir, 'pred_normal.png')))
                 rowcaps.append("Normal (pred.)")
                 rowtypes.append('image')
             if self.shape_mode == 'nerf':
-                row.append(join(batch_dir, 'gt_lvis.png'))
+                row.append(strip(join(batch_dir, 'gt_lvis.png')))
                 rowcaps.append("Light Visibility (initial)")
                 rowtypes.append('image')
             else:
-                row.append(join(batch_dir, 'pred-vs-gt_lvis.apng'))
+                row.append(strip(join(batch_dir, 'pred-vs-gt_lvis.apng')))
                 rowcaps.append("Light Visibility")
                 rowtypes.append('image')
-                row.append(join(batch_dir, 'pred_lvis.png'))
+                row.append(strip(join(batch_dir, 'pred_lvis.png')))
                 rowcaps.append("Light Visibility (pred.)")
                 rowtypes.append('image')
             #

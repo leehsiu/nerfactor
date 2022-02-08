@@ -147,7 +147,18 @@ class Dataset(BaseDataset):
         # Load precomputed shape properties from vanilla NeRF
         paths = self.meta2buf[metadata_path]
         xyz = ioutil.load_np(paths['xyz'])
+
+
         normal = ioutil.load_np(paths['normal'])
+        #replace those normal with (0,0,0) as (0,1,0)
+        normal_bg = np.zeros_like(normal)
+        normal_bg[...,1] = 1.
+        normal_mask = np.linalg.norm(normal,axis=-1,keepdims=True)
+        normal_mask[normal_mask>0.] = 1.
+        normal = normal * normal_mask + normal_bg * (1. - normal_mask)
+
+
+
         if self.debug:
             logger.warn("Faking light visibility for faster debugging")
             lvis = 0.5 * np.ones(normal.shape[:2] + (512,), dtype=np.float32)
